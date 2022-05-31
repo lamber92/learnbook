@@ -69,7 +69,7 @@ func (e *errorString) Error() string {
 }
 ```
 
-errorString 本身非常简单，仅仅实现了 error接口 的基础能力：保存一个错误描述字符串，并能将其输出，没有然后。
+errorString 本身极其简单，仅仅实现了 error接口 的基础能力：保存一个错误描述字符串，并能将其输出，没有然后。
 
 这种设计仅仅能满足与简单的业务场景，或简短的demo；如果在中型项目中使用errorString，可以想象到每次使用string作错误判断的痛苦吧？
 
@@ -600,13 +600,252 @@ func IsTemporary(err error) bool {
 
 
 
+#### 2.2.1. 避免冗长的错误处理代码
+
+Dave Cheney在[[3]](https://dave.cheney.net/2016/04/27/dont-just-check-errors-handle-them-gracefully)中给出一个例子
+
+```go
+func AuthenticateRequest(r *Request) error {
+        err := authenticate(r.User)
+        if err != nil {
+                return err
+        }
+        return nil
+}
+```
+
+很明显代码可以简化到如下：
+
+```go
+func AuthenticateRequest(r *Request) error {
+        return authenticate(r.User)
+}
+```
+
+这是最基本的应对措施。
+
+
+
+#### 2.2.2. 携带堆栈信息
+
+尽管代码足够简约，返回的error信息还是太贫瘠，仅包含一个字符串形式的信息，例如它是：**"No such file or directory"**。
+
+当错误产生在代码层次较深时，我们根本不知道这个错误来自于哪里？？？
+
+如果错误中能携带堆栈信息，就能解决这一困境。
+
+这就不得不说一个具有启蒙意义的第三方包：**"github.com/pkg/errors"**，一个携带有堆栈信息的错误管理包。
+
+```go
+// New 使用提供的消息返回错误。
+// New 还会记录调用时的堆栈跟踪。
+func New(message string) error {
+	return &fundamental{
+		msg:   message,
+		stack: callers(),
+	}
+}
+
+// Errorf 根据格式说明符进行格式化，并将字符串作为满足错误的值返回。
+// Errorf 还会记录调用时的堆栈跟踪。
+func Errorf(format string, args ...interface{}) error {
+	return &fundamental{
+		msg:   fmt.Sprintf(format, args...),
+		stack: callers(),
+	}
+}
+
+// fundamental是一个错误，它有一个消息和一个堆栈，但没有调用者。
+type fundamental struct {
+	msg string
+	*stack
+}
+```
+
+**fundamental** 结构包含堆栈信息 ***stack** 与自定义错误描述 **msg**，只要使用常规的 **New**() 与 **Errorf()** 新建error，就能记录当前位置的堆栈。
+
+除此之外，**fundamental** 还提供了 **Format()**方法，实现了 **Formatter** 接口。使用 **fmt.Printf("%+v", (*fundamental类型的error)** 时可以输出详细的堆栈信息。
+
+- **摘自Go\src\fmt\print.go**
+
+```go
+// Formatter is implemented by any value that has a Format method.
+// The implementation controls how State and rune are interpreted,
+// and may call Sprint(f) or Fprint(f) etc. to generate its output.
+type Formatter interface {
+   Format(f State, verb rune)
+}
+```
+
+- **摘自pkg\mod\github.com\pkg\errors@v0.9.1\errors.go**
+
+```go
+func (f *fundamental) Format(s fmt.State, verb rune) {
+	switch verb {
+	case 'v':
+		if s.Flag('+') {  // <---可以重点看这里的逻辑，进入这个分支可以输出详细的堆栈。
+			io.WriteString(s, f.msg)
+			f.stack.Format(s, verb)
+			return
+		}
+		fallthrough
+	case 's':
+		io.WriteString(s, f.msg)
+	case 'q':
+		fmt.Fprintf(s, "%q", f.msg)
+	}
+}
+```
+
+效果如下：
+
+```tex
+readfile.go:27: could not read config
+readfile.go:14: open failed
+open /Users/dfc/.settings.xml: no such file or directory
+```
+
+这对于定位问题来说就简单多了，不需要反复重现或debug，就能直接知道问题的根源。
+
+
+
+#### 2.2.3. 嵌套error链
+
+在1.2小节我们提到过嵌套错误的问题。当业务流程中，需要携带的错误不止一个时，可以用嵌套error的方式实现。
+
+**"github.com/pkg/errors"**也有一套**"包装"**与**"解包"**的方法
+
+- **摘自pkg\mod\github.com\pkg\errors@v0.9.1\errors.go**
+
+```go
+// WithStack 在调用 WithStack 时使用堆栈跟踪注释 err。
+// 如果 err 为 nil，WithStack 返回 nil。
+func WithStack(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &withStack{
+		err,
+		callers(),
+	}
+}
+
+type withStack struct {
+	error
+	*stack
+}
+
+func (w *withStack) Cause() error { return w.error }
+
+// Unwrap 为 Go 1.13 错误链提供兼容性。
+func (w *withStack) Unwrap() error { return w.error }
+```
+
+类似地，**withStack** 与 **fundamental** 提供了记录堆栈的能力，但扩展了一套 **Cause()** 与 **WithStack()** 方法，意于装载任意的错误，当必要时可以通过解包获取最内部的错误，或对比整个嵌套链的错误包含有业务场景关注的错误。
+
+- **摘自pkg\mod\github.com\pkg\errors@v0.9.1\errors.go**
+
+```go
+// 如果错误没有实现Cause，则返回原来的错误。如果错误为 nil，则将返回 nil 而无需进一步调查。
+func Cause(err error) error {
+	type causer interface {
+		Cause() error
+	}
+
+	for err != nil {
+		cause, ok := err.(causer)
+		if !ok {
+			break
+		}
+		err = cause.Cause()
+	}
+	return err
+}
+```
+
+
+
+这个 **Cause()** 方法是否与1.2小节中提到的 **Unwrap()** 很相像？其实在Go1.13版本前，是没有Unwrap()方法的，我们可以追溯到Go1.12最后一个发布版本的errors官方包代码，errors包下只有一个errors.go文件及其单元测试文件：
+
+- 摘自 https://github.com/golang/go/blob/go1.12.17/src/errors/errors.go
+
+  ```go
+  // Copyright 2011 The Go Authors. All rights reserved.
+  // Use of this source code is governed by a BSD-style
+  // license that can be found in the LICENSE file.
+  
+  // Package errors implements functions to manipulate errors.
+  package errors
+  
+  // New returns an error that formats as the given text.
+  func New(text string) error {
+  	return &errorString{text}
+  }
+  
+  // errorString is a trivial implementation of error.
+  type errorString struct {
+  	s string
+  }
+  
+  func (e *errorString) Error() string {
+  	return e.s
+  }
+  ```
+
+在Go1.13的第一个发布版本时，errors包下加入了wrap.go文件。**Unwrap()** 正式替代了 Cause() 方法。
+
+有兴趣可以看：https://github.com/golang/go/blob/go1.13/src/errors/wrap.go
+
+
+
+### 2.3. Only handle errors once
+
+> I want to mention that you should only handle errors once. Handling an error means inspecting the error value, and making a decision.
+>
+> 我想提一下，你应该只处理一次错误。处理错误意味着检查错误值并做出决定。
+
+我们来看一下没处理错误的例子：
+
+```go
+func (d *Data) ConvData(b []byte) {
+    json.Unmarshal(b, d)   // <---此处直接吞掉了Unmarshal()的返回值error
+}
+```
+
+```go
+func Unmarshal(data []byte, v interface{}) error {
+	// 检查格式是否正确。
+	// 避免在发现 JSON 语法错误之前填写半个数据结构。
+	var d decodeState
+	err := checkValid(data, &d.scan)
+	if err != nil {
+		return err
+	}
+
+	d.init(data)
+	return d.unmarshal(v)
+}
+```
+
+这是一个**非常不好的习惯**，当**b**的内容不是一个合法的json结构时，**Unmarshal()** 的错误没有被外层感知，调用 **ConvData()** 的开发者很可能认为内部不会发生错误，且在**d**在必须非空数据的业务场景时引发了业务错误，并且难以排查。
+
+
+
+因此当你非常确认该错误可以忽略时，请你用 **_** (下划线显式说明忽略该返回值)，起到一定的提示作用（goland编辑器针对隐式省略返回值的代码行也会进行高亮显式）：
+
+```go
+func (d *Data) ConvData(b []byte) {
+    _ = json.Unmarshal(b, d)
+}
+```
+
 
 
 
 
 ## 3. kiterror与kitcode
 
-阅读了第2章之后，大家都应理解应该怎么去处理error。
+阅读了第2章之后，都应理解应该怎么去处理error。
 
 然而理想是丰满的，现实是骨感的。GO经过了多次迭代，以及庞大生态产生的error实现方式是多样的，而集成优秀组件必然不能因为error处理麻烦而却步。
 
@@ -646,3 +885,5 @@ func IsTemporary(err error) bool {
 3. https://dave.cheney.net/2016/04/27/dont-just-check-errors-handle-them-gracefully [Dave Cheney阐述如何优雅处理error]
 
 4. https://go.dev/blog/errors-are-values [Rob Pike阐述错误处理思想]
+
+5. https://github.com/golang/go [go语言官方开源库]
