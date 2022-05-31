@@ -1,4 +1,4 @@
-# Golang实战心得之error
+# error
 
 <p align="right">Lamber</p>
 <p align="right">2022-05-23</p>
