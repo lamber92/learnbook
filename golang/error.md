@@ -1,4 +1,4 @@
-# error
+# Golang实战心得之error
 
 <p align="right">Lamber</p>
 <p align="right">2022-05-23</p>
@@ -91,7 +91,7 @@ func Unwrap(err error) error {
 }
 ```
 
-`Unwrap` 解析error中包裹的error，即反解嵌套的error。此场景在业务逻辑中罕见，但是必要手段，唯一缺陷是 实现者 必须包含 `Unwarp(error) error` 方法。
+`Unwrap` 解析error中包裹的error，即反解嵌套的error。此场景在业务逻辑中比较少出现，但是是必要手段，唯一缺陷是 实现者 必须包含 `Unwrap(error) error` 方法。
 
 
 
@@ -142,7 +142,7 @@ func (e *wrapError) Unwrap() error {
 }
 ```
 
-fmt包的作者依然为多次嵌套error提供了反解能力，使用`%w占位符`表达err时，会将传入的err保存到 wrapError 内部的err变量中，并实现了 `Unwrap() error` 方法，使得通过 fmt.Errorf() 函数包裹的原始err可以在外部进行比对及反解。
+fmt包的作者依然为多次嵌套error提供了反解能力，使用**%w占位符**表达err时，会将传入的err保存到 wrapError 内部的err变量中，并实现了 **Unwrap()** 方法，使得通过 fmt.Errorf() 函数包裹的原始err可以在外部进行比对及反解。
 
 但需要注意几点：
 
@@ -164,7 +164,7 @@ fmt.Println(errors.Unwrap(e2) == e1) // true
 
 ### 1.4. error接口有什么问题？ 
 
-综合 1.1 ~ 1.3 小节，我们可以总结出官方提供的error接口实现存在的问题：
+综合 1.1 ~ 1.3 小节，可以总结出官方提供的error接口实现存在的问题：
 
 - 只保存了简单的字符串信息，无法追溯错误发生的源头；或需要煞费苦心地对比错误的字符串内容是否为自己所需的，从而进行下一步业务操作；
 
@@ -804,11 +804,19 @@ func Cause(err error) error {
 >
 > 我想提一下，你应该只处理一次错误。处理错误意味着检查错误值并做出决定。
 
+
+
+#### 2.3.1. 妥善处理每一个错误 
+
 我们来看一下没处理错误的例子：
 
 ```go
 func (d *Data) ConvData(b []byte) {
+    ...... // 其他逻辑
+    ......
     json.Unmarshal(b, d)   // <---此处直接吞掉了Unmarshal()的返回值error
+    ......
+    ......
 }
 ```
 
@@ -829,9 +837,13 @@ func Unmarshal(data []byte, v interface{}) error {
 
 这是一个**非常不好的习惯**，当**b**的内容不是一个合法的json结构时，**Unmarshal()** 的错误没有被外层感知，调用 **ConvData()** 的开发者很可能认为内部不会发生错误，且在**d**在必须非空数据的业务场景时引发了业务错误，并且难以排查。
 
+正如 Rob Pike 所说：**"But remember: Whatever you do, always check your errors!"**
 
 
-因此当你非常确认该错误可以忽略时，请你用 **_** (下划线显式说明忽略该返回值)，起到一定的提示作用（goland编辑器针对隐式省略返回值的代码行也会进行高亮显式）：
+
+但万事都有极端情况，当你非常确认该错误可以忽略时，请你用 **_** (下划线显式说明忽略该返回值)，起到一定的提示作用。
+
+（goland编辑器针对隐式省略返回值的代码行也会进行高亮提示）：
 
 ```go
 func (d *Data) ConvData(b []byte) {
@@ -840,6 +852,53 @@ func (d *Data) ConvData(b []byte) {
 ```
 
 
+
+#### 2.3.2. 只处理错误一次
+
+针对一个错误做出多个决定也是有问题的。
+
+```go
+func Write(w io.Writer, buf []byte) error {
+        _, err := w.Write(buf)
+        if err != nil {
+                // 带注释的错误进入日志文件
+                log.Println("unable to write:", err)
+            
+                // 未注释的错误返回给调用者
+                return err
+        }
+        return nil
+}
+```
+
+在此示例中，如果在 `Write` 期间发生错误，会将一行写入日志文件，记录发生错误的文件和行，并将错误也返回给上层。上层调用者可能也会记录日志并返回错误给上上层。最终，会在日志文件中得到一堆重复的行，但在最外层，仅仅得到一个没有任何上下文的原始错误。这样的日志会给排查问题的人带来疑惑，到底发生了几次错误呢？
+
+因此推荐只处理错误一次。
+
+
+
+### 2.4. 总结
+
+最后，Dave Cheney给出了他的总结：
+
+> In conclusion, errors are part of your package’s public API, treat them with as much care as you would any other part of your public API.
+>
+> For maximum flexibility I recommend that you try to treat all errors as opaque. In the situations where you cannot do that, assert errors for behaviour, not type or value.
+>
+> Minimise the number of sentinel error values in your program and convert errors to opaque errors by wrapping them with `errors.Wrap` as soon as they occur.
+>
+> Finally, use `errors.Cause` to recover the underlying error if you need to inspect it.
+
+这些总结也成为了处理错误和设计自定义错误结构的准则：
+
+- **首先，错误隶属于包中 公共API 的一部分，请像对待公共 API 的任何其他部分一样小心对待它们。**
+- **为了获得最大的灵活性，建议尝试将所有错误视为不透明的。在你不能这样做的情况下，断言错误的行为，而不是类型或值。**
+
+- **最大限度地减少程序中 Sentinel errors 的数量，并通过在错误发生时，立即使用`errors.Wrap`将其包装起来，将错误转换为 opaque errors。**
+
+- **最后，如果您需要检查错误原因，请使用`errors.Cause`来恢复底层错误。**
+
+最终，结合业务场景，目前已经诞生出非常多的自定义error结构方案，下面我们着重分析一下kit-go中的实现。
 
 
 
@@ -855,23 +914,27 @@ func (d *Data) ConvData(b []byte) {
 
 下面我们来看下kiterror具备哪些能力
 
-3.1. 携带错误产生位置的堆栈信息
 
-3.2. 携带原始错误，支持常见错误类型自动转换为内部类型
+
+### 3.1. 携带错误产生位置的堆栈信息
+
+### 3.2. 携带原始错误，支持常见错误类型自动转换为内部类型
 
 ​		不知道方法内部是否已经转换过error，没关系，直接用kiterror.Convert()方法即可！
 
-3.3. 自动映射错误类型
+### 3.3. 自动映射错误类型
 
 ​		一种错误码，自适应HTTP/gRPC接口响应
 
 ​		接口模式设计，支持自定义扩展
 
-3.4. 携带业务子错误类型
+### 3.4. 携带业务子错误类型
 
-3.5. 支持返回主错误类型及子错误类型，及支持直接判断错误类型
+### 3.5. 支持返回主错误类型及子错误类型，及支持直接判断错误类型
 
-3.6. 支持直接判断错误的行为
+### 3.6. 支持直接判断错误的行为
+
+### 3.7. 接口访问中间件对错误进行一次性处理
 
 
 
