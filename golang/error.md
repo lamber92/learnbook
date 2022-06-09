@@ -105,7 +105,7 @@ func As(err, target error) bool {
 }
 ```
 
-作者想到error的使用者可能会将error嵌套多层。**Is()** 函数可以判断在error嵌套链中是否存在目标error，即类型==运算；而 **As()** 函数可以判断目标error的实例类型是否存在与error嵌套链中。当然，这两个函数都依赖 **Unwarp()**。
+作者想到error的使用者可能会将error嵌套多层。**Is()** 函数可以判断在error嵌套链中是否存在目标error，即error值==运算；而 **As()** 函数可以判断目标error的实例类型是否存在与error嵌套链中。当然，这两个函数都依赖 **Unwarp()**。
 
 
 
